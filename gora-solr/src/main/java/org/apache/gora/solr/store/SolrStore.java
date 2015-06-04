@@ -43,10 +43,12 @@ import org.apache.gora.store.impl.DataStoreBase;
 import org.apache.gora.util.AvroUtils;
 import org.apache.gora.util.IOUtils;
 import org.apache.hadoop.util.StringUtils;
-import org.apache.http.impl.client.DefaultHttpClient;
-import org.apache.solr.client.solrj.SolrServer;
+import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrServerException;
-import org.apache.solr.client.solrj.impl.*;
+import org.apache.solr.client.solrj.impl.CloudSolrClient;
+import org.apache.solr.client.solrj.impl.ConcurrentUpdateSolrClient;
+import org.apache.solr.client.solrj.impl.HttpSolrClient;
+import org.apache.solr.client.solrj.impl.LBHttpSolrClient;
 import org.apache.solr.client.solrj.request.CoreAdminRequest;
 import org.apache.solr.client.solrj.response.CoreAdminResponse;
 import org.apache.solr.client.solrj.response.QueryResponse;
@@ -83,33 +85,12 @@ public class SolrStore<K, T extends PersistentBase> extends DataStoreBase<K, T> 
    */
   protected static final String SOLR_BATCH_SIZE_PROPERTY = "solr.batch_size";
 
-  /** The solrj implementation to use. This has a default value of <i>http</i> for HttpSolrServer.
+  /** The solrj implementation to use. This has a default value of <i>http</i> for HttpSolrClient.
    * Available options include <b>http</b>, <b>cloud</b>, <b>concurrent</b> and <b>loadbalance</b>. 
    * Defined in <code>gora.properties</code>
    * This value must be of type <b>String</b>.
    */
   protected static final String SOLR_SOLRJSERVER_IMPL = "solr.solrjserver";
-
-  /** Whether to use secured Solr client or not.
-   * Available options include <b>true</b>, and <b>false</b>.
-   * Defined in <code>gora.properties</code>
-   * This value must be of type <b>boolean</b>.
-   */
-  protected static final String SOLR_SERVER_USER_AUTH = "solr.solrjserver.user_auth";
-
-  /** Solr client username.
-   * Solr client user authentication should be enabled for this property.
-   * Defined in <code>gora.properties</code>
-   * This value must be of type <b>String</b>.
-   */
-  protected static final String SOLR_SERVER_USERNAME = "solr.solrjserver.username";
-
-  /** Solr client password.
-   * Solr client user authentication should be enabled for this property.
-   * Defined in <code>gora.properties</code>
-   * This value must be of type <b>String</b>.
-   */
-  protected static final String SOLR_SERVER_PASSWORD = "solr.solrjserver.password";
 
   /** A batch commit unit for SolrDocument's used when making (commit) calls to Solr.
    * Should be defined in <code>gora.properties</code>. 
@@ -145,13 +126,7 @@ public class SolrStore<K, T extends PersistentBase> extends DataStoreBase<K, T> 
 
   private String solrServerUrl, solrConfig, solrSchema, solrJServerImpl;
 
-  private SolrServer server, adminServer;
-
-  private boolean serverUserAuth;
-
-  private String serverUsername;
-
-  private String serverPassword;
+  private SolrClient server, adminServer;
 
   private ArrayList<SolrInputDocument> batch;
 
@@ -198,67 +173,35 @@ public class SolrStore<K, T extends PersistentBase> extends DataStoreBase<K, T> 
         SOLR_SCHEMA_PROPERTY, null);
     solrJServerImpl = DataStoreFactory.findProperty(properties, this, 
         SOLR_SOLRJSERVER_IMPL, "http");
-    serverUserAuth = DataStoreFactory.findBooleanProperty(properties, this,
-        SOLR_SERVER_USER_AUTH, "false");
-    if (serverUserAuth) {
-      serverUsername = DataStoreFactory.findProperty(properties, this,
-          SOLR_SERVER_USERNAME, null);
-      serverPassword = DataStoreFactory.findProperty(properties, this,
-          SOLR_SERVER_PASSWORD, null);
-    }
     LOG.info("Using Solr server at " + solrServerUrl);
     String solrJServerType = ((solrJServerImpl == null || solrJServerImpl.equals(""))?"http":solrJServerImpl);
-    // HttpSolrServer - denoted by "http" in properties
+    // HttpSolrClient - denoted by "http" in properties
     if (solrJServerType.toString().toLowerCase().equals("http")) {
-      LOG.info("Using HttpSolrServer Solrj implementation.");
-      this.adminServer = new HttpSolrServer(solrServerUrl);
-      this.server = new HttpSolrServer( solrServerUrl + "/" + mapping.getCoreName() );
-      if (serverUserAuth) {
-        HttpClientUtil.setBasicAuth(
-            (DefaultHttpClient) ((HttpSolrServer) adminServer).getHttpClient(),
-            serverUsername, serverPassword);
-        HttpClientUtil.setBasicAuth(
-            (DefaultHttpClient) ((HttpSolrServer) server).getHttpClient(),
-            serverUsername, serverPassword);
-      }
-      // CloudSolrServer - denoted by "cloud" in properties
+      LOG.info("Using HttpSolrClient Solrj implementation.");
+      this.adminServer = new HttpSolrClient(solrServerUrl);
+      this.server = new HttpSolrClient( solrServerUrl + "/" + mapping.getCoreName() );
+      // CloudSolrClient - denoted by "cloud" in properties
     } else if (solrJServerType.toString().toLowerCase().equals("cloud")) {
-      LOG.info("Using CloudSolrServer Solrj implementation.");
-      this.adminServer = new CloudSolrServer(solrServerUrl);
-      this.server = new CloudSolrServer( solrServerUrl + "/" + mapping.getCoreName() );
-      if (serverUserAuth) {
-        HttpClientUtil.setBasicAuth(
-            (DefaultHttpClient) ((CloudSolrServer) adminServer).getLbServer().getHttpClient(),
-            serverUsername, serverPassword);
-        HttpClientUtil.setBasicAuth(
-            (DefaultHttpClient) ((CloudSolrServer) server).getLbServer().getHttpClient(),
-            serverUsername, serverPassword);
-      }
+      LOG.info("Using CloudSolrClient Solrj implementation.");
+      this.adminServer = new CloudSolrClient(solrServerUrl);
+      this.server = new CloudSolrClient( solrServerUrl + "/" + mapping.getCoreName() );
     } else if (solrJServerType.toString().toLowerCase().equals("concurrent")) {
-      LOG.info("Using ConcurrentUpdateSolrServer Solrj implementation.");
-      this.adminServer = new ConcurrentUpdateSolrServer(solrServerUrl, 1000, 10);
-      this.server = new ConcurrentUpdateSolrServer( solrServerUrl + "/" + mapping.getCoreName(), 1000, 10);
-      // LBHttpSolrServer - denoted by "loadbalance" in properties
+      LOG.info("Using ConcurrentUpdateSolrClient Solrj implementation.");
+      this.adminServer = new ConcurrentUpdateSolrClient(solrServerUrl, 1000, 10);
+      this.server = new ConcurrentUpdateSolrClient( solrServerUrl + "/" + mapping.getCoreName(), 1000, 10);
+      // LBHttpSolrClient - denoted by "loadbalance" in properties
     } else if (solrJServerType.toString().toLowerCase().equals("loadbalance")) {
-      LOG.info("Using LBHttpSolrServer Solrj implementation.");
+      LOG.info("Using LBHttpSolrClient Solrj implementation.");
       String[] solrUrlElements = StringUtils.split(solrServerUrl);
       try {
-        this.adminServer = new LBHttpSolrServer(solrUrlElements);
+        this.adminServer = new LBHttpSolrClient(solrUrlElements);
       } catch (MalformedURLException e) {
         e.printStackTrace();
       }
       try {
-        this.server = new LBHttpSolrServer( solrUrlElements + "/" + mapping.getCoreName() );
+        this.server = new LBHttpSolrClient( solrUrlElements + "/" + mapping.getCoreName() );
       } catch (MalformedURLException e) {
         e.printStackTrace();
-      }
-      if (serverUserAuth) {
-        HttpClientUtil.setBasicAuth(
-            (DefaultHttpClient) ((LBHttpSolrServer) adminServer).getHttpClient(),
-            serverUsername, serverPassword);
-        HttpClientUtil.setBasicAuth(
-            (DefaultHttpClient) ((LBHttpSolrServer) server).getHttpClient(),
-            serverUsername, serverPassword);
       }
     }
     if (autoCreateSchema) {
